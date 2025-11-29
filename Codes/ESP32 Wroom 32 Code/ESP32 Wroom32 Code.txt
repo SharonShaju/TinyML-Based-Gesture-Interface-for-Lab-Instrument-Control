@@ -1,0 +1,246 @@
+//TinyML Based Gesture Interface For Lab Instrument Control
+
+#include <esp_now.h>
+#include <WiFi.h>
+#include <Wire.h>
+#include <Adafruit_SSD1306.h>
+
+// === OLED Setup ===
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+// === Buzzer ===
+#define BUZZER_PIN 23   // was 34 b updated to safe GPIO23
+
+// === Function Generator Pins ===
+#define FG_FREQ_INC_PIN 32
+#define FG_FREQ_DEC_PIN 33
+#define FG_DUTY_INC_PIN 25
+#define FG_DUTY_DEC_PIN 26
+
+// === Motor pins (updated wiring) ===
+#define IN1 4           // unchanged
+#define IN2 16          // was 0 b updated to 16
+#define ENA 17          // was 2 b updated to 17
+
+// === DFR1154 MAC ===
+uint8_t dfr1154Mac[6] = { 0x98, 0xA3, 0x16, 0xC6, 0x79, 0xE8 };
+
+// === State Tracking ===
+enum Level { LEVEL1,
+             LEVEL2,
+             LEVEL3
+           };
+Level currentLevel = LEVEL1;
+String selectedInstrument = "";
+String selectedParam = "";
+
+// === Helper Functions: Buzzer ===
+void beepPattern(int count, int freq, int duration, int gap) {
+	for (int i = 0; i < count; i++) {
+		tone(BUZZER_PIN, freq, duration);
+		delay(gap);
+	}
+}
+void beepOK() {
+	beepPattern(2, 2500, 150, 200);
+}
+void beepError() {
+	beepPattern(3, 1250, 100, 300);
+}
+
+// === OLED helper ===
+void showOLEDMessage(const String &topLine, const String &bottomLine = "") {
+	display.clearDisplay();
+	display.setTextSize(1);
+	display.setTextColor(SSD1306_WHITE);
+	display.setCursor(0, 0);
+	display.println(topLine);
+	if (bottomLine.length() > 0) {
+		display.setCursor(0, 50);
+		display.println(bottomLine);
+	}
+	display.display();
+}
+
+// === Motor Functions ===
+void runMotor(bool cw) {
+	if (cw) {
+		digitalWrite(IN1, HIGH);
+		digitalWrite(IN2, LOW);
+	} else {
+		digitalWrite(IN1, LOW);
+		digitalWrite(IN2, HIGH);
+	}
+	analogWrite(ENA, 200);
+}
+
+void stopMotor() {
+	digitalWrite(IN1, LOW);
+	digitalWrite(IN2, LOW);
+	analogWrite(ENA, 0);
+}
+
+void motorCW_1s() {
+	runMotor(true);
+	delay(300);  // 300 ms
+	stopMotor();
+}
+void motorCCW_1s() {
+	runMotor(false);
+	delay(300);  // 300 ms
+	stopMotor();
+}
+
+// === Gesture Logic ===
+void processGesture(const String &gestureLine) {
+	int colonIdx = gestureLine.indexOf(":");
+	int parenIdx = gestureLine.indexOf("(");
+	int percIdx = gestureLine.indexOf("%");
+	if (colonIdx < 0 || parenIdx < 0 || percIdx < 0) return;
+
+	String label = gestureLine.substring(colonIdx + 2, parenIdx - 1);
+	float confidence = gestureLine.substring(parenIdx + 1, percIdx).toFloat();
+
+	if (confidence < 85.0) {
+		showOLEDMessage("Couldn't Detect...", "Try Again!");
+		beepError();
+		return;
+	}
+
+	switch (currentLevel) {
+	case LEVEL1:
+		if (label == "1_switch_first") {
+			selectedInstrument = "Function Generator";
+			currentLevel = LEVEL2;
+			showOLEDMessage("Selected:", selectedInstrument);
+			beepOK();
+		} else if (label == "2_switch_second") {
+			selectedInstrument = "Rotary Knob";
+			currentLevel = LEVEL3;
+			showOLEDMessage("Selected:", selectedInstrument);
+			beepOK();
+		} else {
+			showOLEDMessage("Invalid Gesture", "");
+			beepError();
+		}
+		break;
+
+	case LEVEL2:
+		if (selectedInstrument == "Function Generator") {
+			if (label == "3_prev_button") {
+				selectedParam = "Frequency";
+				currentLevel = LEVEL3;
+				showOLEDMessage("Parameter:", selectedParam);
+				beepOK();
+			} else if (label == "4_next_button") {
+				selectedParam = "Duty Cycle";
+				currentLevel = LEVEL3;
+				showOLEDMessage("Parameter:", selectedParam);
+				beepOK();
+			} else {
+				showOLEDMessage("Invalid Gesture", "");
+				beepError();
+			}
+		}
+		break;
+
+	case LEVEL3:
+		if (label == "5_increase_value") {
+			showOLEDMessage("Increasing Value", selectedInstrument + " " + selectedParam);
+			beepOK();
+			if (selectedInstrument == "Function Generator") {
+				if (selectedParam == "Frequency") {
+					digitalWrite(FG_FREQ_INC_PIN, HIGH);
+					delay(100);
+					digitalWrite(FG_FREQ_INC_PIN, LOW);
+				} else if (selectedParam == "Duty Cycle") {
+					digitalWrite(FG_DUTY_INC_PIN, HIGH);
+					delay(100);
+					digitalWrite(FG_DUTY_INC_PIN, LOW);
+				}
+			} else if (selectedInstrument == "Rotary Knob") motorCW_1s();
+		} else if (label == "6_decrease_value") {
+			showOLEDMessage("Decreasing Value", selectedInstrument + " " + selectedParam);
+			beepOK();
+			if (selectedInstrument == "Function Generator") {
+				if (selectedParam == "Frequency") {
+					digitalWrite(FG_FREQ_DEC_PIN, HIGH);
+					delay(100);
+					digitalWrite(FG_FREQ_DEC_PIN, LOW);
+				} else if (selectedParam == "Duty Cycle") {
+					digitalWrite(FG_DUTY_DEC_PIN, HIGH);
+					delay(100);
+					digitalWrite(FG_DUTY_DEC_PIN, LOW);
+				}
+			} else if (selectedInstrument == "Rotary Knob") motorCCW_1s();
+		} else if (label == "1_switch_first" || label == "2_switch_second") {
+			currentLevel = LEVEL1;
+			processGesture("Detected gesture: " + label + " (100%)");
+		} else {
+			showOLEDMessage("Invalid Gesture", "");
+			beepError();
+		}
+		break;
+	}
+}
+
+// === ESP-NOW Callback ===
+void onDataRecv(const esp_now_recv_info_t *, const uint8_t *incomingData, int len) {
+	String msg = "";
+	for (int i = 0; i < len; i++) msg += (char)incomingData[i];
+	Serial.println("Received: " + msg);
+	if (msg.startsWith("Detected gesture:")) processGesture(msg);
+}
+
+// === Setup & Loop ===
+void setup() {
+	Serial.begin(115200);
+	Wire.begin(21, 22);
+
+	if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+		Serial.println("OLED init failed!");
+		while (true)
+			;
+	}
+
+	pinMode(BUZZER_PIN, OUTPUT);
+	pinMode(FG_FREQ_INC_PIN, OUTPUT);
+	pinMode(FG_FREQ_DEC_PIN, OUTPUT);
+	pinMode(FG_DUTY_INC_PIN, OUTPUT);
+	pinMode(FG_DUTY_DEC_PIN, OUTPUT);
+	pinMode(IN1, OUTPUT);
+	pinMode(IN2, OUTPUT);
+	pinMode(ENA, OUTPUT);
+
+	digitalWrite(IN1, LOW);
+	digitalWrite(IN2, LOW);
+	digitalWrite(ENA, LOW);
+
+	beepOK();
+	showOLEDMessage("TinyML Gesture\nInterface For Lab\nInstrument Control\n With AV Feeback\n");
+	delay(2000);
+	beepOK();
+	showOLEDMessage("Team Mates:\n1) March Mohan\n2) Sharon Shaju\n", "");
+	delay(1000);
+
+	WiFi.mode(WIFI_STA);
+	if (esp_now_init() != ESP_OK) {
+		showOLEDMessage("ESP-NOW", "Init Failed!");
+		beepError();
+		return;
+	}
+	esp_now_register_recv_cb(onDataRecv);
+
+	esp_now_peer_info_t peerInfo = {};
+	memcpy(peerInfo.peer_addr, dfr1154Mac, 6);
+	peerInfo.channel = 0;
+	peerInfo.encrypt = false;
+	esp_now_add_peer(&peerInfo);
+}
+
+void loop() {
+	delay(50);
+}
