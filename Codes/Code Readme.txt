@@ -1,0 +1,1 @@
+All the code is written in C and is intended for the Arduino IDE
