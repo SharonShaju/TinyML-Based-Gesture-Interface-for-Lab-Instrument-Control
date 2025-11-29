@@ -1,0 +1,2 @@
+# TinyML-Based-Gesture-Interface-for-Lab-Instrument-Control
+This project implements a touc free lab interface using embedded ML. An ESP32-S3 AI Camera runs a TinyML model locally, sending gestures via ESP-NOW to an ESP32 WROOM-32 to control a function generator and rotary knob as demo instrument. It avoids heavy computer setups, enabling compact, standalone gesture control with audio-visual feedback
